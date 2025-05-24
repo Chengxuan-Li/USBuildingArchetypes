@@ -319,15 +319,13 @@ def cluster_subset(ccat, ccon, subset, cluster_method, fig, axes, axpos=0):
     axes[axpos].set_ylabel('BIC')
     axes[axpos].set_xlabel('Number of Clusters')
     axes[axpos].grid(True)
-    bg = (bmax - bmin) * 0.01
 
-
-    axes[axpos].bar(interval, [evaluate_mls(m, da.index, plot=False)[0]['Accuracy'].max() * (bmax - bmin) for m in metrics], .4, bottom=bmin, alpha=0.5, label='Prediction Accuracy')
-
-    axes[axpos].legend(prop={'size': 8})
-    
-
-    axes[axpos].set_ylim(bmin - bg, bmax + bg)
+    axtwin = axes[axpos].twinx()
+    axtwin.bar(interval, [evaluate_mls(m, da.index, plot=False)[0]['Accuracy'].max() for m in metrics], .4, alpha=0.5, label='Assignment Accuracy')
+    axtwin.set_ylim(0, 1)
+    handles, labels = axes[axpos].get_legend_handles_labels()
+    handles2, labels2 = axtwin.get_legend_handles_labels()
+    axes[axpos].legend(handles + handles2, labels + labels2, loc='upper right', prop={'size': 8})
     return da, metrics
 
 
