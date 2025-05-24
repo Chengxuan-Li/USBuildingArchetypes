@@ -2,36 +2,41 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from utilities import parse_climate_code
+from utilities import KWH2BTU, BTU2KWH, SQF2SQM, SQM2SQF, THM2BTU, BTU2THM
+import warnings
+
+
+warnings.filterwarnings('ignore')
 
 path_to_recs_microdata = '../resources/RECS/recs2020_public_v6.csv'
 path_to_recs_codebook = '../resources/RECS/codebook_updated.csv'#'../Data/US/RECS/RECS 2020 Codebook for Public File - v6.csv'
 
 class Codebook:
     def __init__(self, path_to_codebook=path_to_recs_codebook):
-        self.__codebook = pd.read_csv(path_to_codebook, skiprows=[0])
+        self.codebook = pd.read_csv(path_to_codebook, skiprows=[0])
 
     def sections(self):
-        return self.__codebook['Section'].unique()
+        return self.codebook['Section'].unique()
     
 
     def search_by_variable(self, keyword, section=None):
         if section is None:
-            return self.__codebook[self.__codebook['Variable'].apply(lambda x: keyword.lower() in str(x).lower())]
+            return self.codebook[self.codebook['Variable'].apply(lambda x: keyword.lower() in str(x).lower())]
         else:
-            subbook = self.__codebook[self.__codebook['Section'] == section]
+            subbook = self.codebook[self.codebook['Section'] == section]
             return subbook[subbook['Variable'].apply(lambda x: keyword.lower() in str(x).lower())]
     
     def search(self, keyword, section=None, variable=False):
         if variable:
             return self.search_by_variable(keyword, section=section)
         if section is None:
-            return self.__codebook[self.__codebook['Description and Labels'].apply(lambda x: keyword.lower() in str(x).lower())]
+            return self.codebook[self.codebook['Description and Labels'].apply(lambda x: keyword.lower() in str(x).lower())]
         else:
-            subbook = self.__codebook[self.__codebook['Section'] == section]
+            subbook = self.codebook[self.codebook['Section'] == section]
             return subbook[subbook['Description and Labels'].apply(lambda x: keyword.lower() in str(x).lower())]
     
     def get_response_codes(self, variable):
-        return self.__codebook[self.__codebook['Variable'] == variable]['Response Codes'].iloc[0]
+        return self.codebook[self.codebook['Variable'] == variable]['Response Codes'].iloc[0]
     
     def parse_categorical_response_codes(self, response_string: str):
         entries = response_string.split('\n')
@@ -77,10 +82,10 @@ def preprocessing(recs: pd.DataFrame, cb: Codebook):
     df_computed = recs.copy()
 
     # According to the codebook, replace the NA flags (-2, -4, 99, etc.) with the correct default value
-    for _, row in cb.__cookbook[~np.isnan(cb.__cookbook['Target1'])].iterrows():
+    for _, row in cb.codebook[~np.isnan(cb.codebook['Target1'])].iterrows():
         df_computed.loc[df_computed[row['Variable']] == row['Handle1'], row['Variable']] = row['Target1']
 
-    for i_,  row in cb.__cookbook[~np.isnan(cb.__cookbook['Target2'])].iterrows():
+    for i_,  row in cb.codebook[~np.isnan(cb.codebook['Target2'])].iterrows():
         df_computed.loc[df_computed[row['Variable']] == row['Handle2'], row['Variable']] = row['Target2']
 
 
@@ -264,10 +269,10 @@ def preprocessing(recs: pd.DataFrame, cb: Codebook):
 
     known_variables = {}
     template_variables = {}
-    known_variables['Known'] = cb.__codebook[cb.__codebook['Availability'] == 'Known']['Variable'].values.tolist()
-    known_variables['Imputable'] = cb.__codebook[cb.__codebook['Availability'] == 'Imputable']['Variable'].values.tolist()
-    for u in cb.__codebook[~cb.__codebook['Template'].isna()]['Template'].unique():
-        template_variables[u] = cb.__codebook[cb.__codebook['Template'] == u]['Variable'].values.tolist()
+    known_variables['Known'] = cb.codebook[cb.codebook['Availability'] == 'Known']['Variable'].values.tolist()
+    known_variables['Imputable'] = cb.codebook[cb.codebook['Availability'] == 'Imputable']['Variable'].values.tolist()
+    for u in cb.codebook[~cb.codebook['Template'].isna()]['Template'].unique():
+        template_variables[u] = cb.codebook[cb.codebook['Template'] == u]['Variable'].values.tolist()
     known_variables.keys(), template_variables.keys()
 
 
@@ -341,10 +346,10 @@ def preprocessing(recs: pd.DataFrame, cb: Codebook):
 
 
     # These are all preprocessed feature columns
-    cols_discarded = cb.__codebook[cb.__codebook['Preserved'] <= .01]['Variable'].values.tolist()
-    cols_continuous = cb.__codebook[(cb.__codebook['Preserved'] >= 0.99) & ((cb.__codebook['Notes'] == 'Numerical') & (cb.__codebook['NaiveScale'] != 1))]['Variable'].values.tolist()
-    cols_scaled = cb.__codebook[(cb.__codebook['Preserved'] >= 0.99) & ((cb.__codebook['Notes'] == 'Numerical') & (cb.__codebook['NaiveScale'] == 1))]['Variable'].values.tolist() + ['climate_code_heat']
-    cols_categorical = cb.__codebook[(cb.__codebook['Preserved'] >= 0.99) & (cb.__codebook['Notes'] == 'Categorical')]['Variable'].values.tolist() + ['climate_code_humidity']
+    cols_discarded = cb.codebook[cb.codebook['Preserved'] <= .01]['Variable'].values.tolist()
+    cols_continuous = cb.codebook[(cb.codebook['Preserved'] >= 0.99) & ((cb.codebook['Notes'] == 'Numerical') & (cb.codebook['NaiveScale'] != 1))]['Variable'].values.tolist()
+    cols_scaled = cb.codebook[(cb.codebook['Preserved'] >= 0.99) & ((cb.codebook['Notes'] == 'Numerical') & (cb.codebook['NaiveScale'] == 1))]['Variable'].values.tolist() + ['climate_code_heat']
+    cols_categorical = cb.codebook[(cb.codebook['Preserved'] >= 0.99) & (cb.codebook['Notes'] == 'Categorical')]['Variable'].values.tolist() + ['climate_code_humidity']
 
     # These are derived/computed columns
     cols_computed = ['total_sqm_en', 'total_kwh',
@@ -481,6 +486,12 @@ def preprocessing(recs: pd.DataFrame, cb: Codebook):
     df_computed['eui_btu_ofuel_thermal'] = df_computed['total_btu_ofuel_thermal']/ df_computed['total_sqm_en']  
     df_computed['eui_btu_ofuel_activity'] = df_computed['total_btu_ofuel_activity']/ df_computed['total_sqm_en']  
 
+    df_computed['window_per_sqm'] = df_computed['WINDOWS'] / df_computed['total_sqm_en'] 
+    df_computed['door_per_sqm'] = df_computed['DOOR1SUM'] / df_computed['total_sqm_en']
+
+
+    df_computed = df_computed.copy()  # this defragments the DataFrame
+
 
     return df_computed
 # 0521 checkpoint
@@ -501,6 +512,6 @@ def preprocessing(recs: pd.DataFrame, cb: Codebook):
 #     'gs_annual': 'corrected_thmng'
 # }
 
-cd = Codebook()
+cb = Codebook()
 recs = pd.read_csv(path_to_recs_microdata, index_col=0)
-df_computed = preprocessing(recs)
+df_computed = preprocessing(recs, cb)
