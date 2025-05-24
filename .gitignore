@@ -84,3 +84,6 @@ ipython_config.py
 
 # Jupyter runtime files
 ~/.local/share/jupyter/runtime/
+
+# CatBoost runtime
+**/catboost_info/
