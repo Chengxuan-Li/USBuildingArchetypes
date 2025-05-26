@@ -34,6 +34,11 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import accuracy_score, log_loss
 
+import torch
+from pomegranate.gmm import GeneralMixtureModel
+from pomegranate.distributions import Normal
+
+
 # Get the Set1 colormap
 cmap = get_cmap('Set1')
 
@@ -258,6 +263,111 @@ def perform_gmm(data, n=2, seed=0, covariance_type='full'):
     gmm = GaussianMixture(n_components=n, covariance_type=covariance_type)
     gmm.fit(data)
     return gmm
+
+def perform_gmm_weighted(data, n=2, seed=0, covariance_type='full', weights=None):
+
+    np.random.seed(seed)
+
+    if weights is None:
+        weights = np.ones(data.shape[0])
+
+    # KMeans intialization
+    kmeans = KMeans(n_clusters=n)
+    labels = kmeans.fit_predict(data, sample_weight=weights)
+    
+    dists = []
+    priors = []
+
+    for i in range(n):
+        mask = labels == i
+        Xi = data[mask]
+        wi = weights[mask]
+
+        # Weighted mean
+        mean = np.average(Xi, axis=0, weights=wi)
+
+        # Weighted covariance (biased)
+        Xi_centered = Xi - mean
+        cov = np.cov(Xi_centered.T, aweights=wi, ddof=0)
+
+        dists.append(Normal(
+            means=torch.tensor(mean, dtype=torch.float32),
+            covs=torch.tensor(cov, dtype=torch.float32),
+            covariance_type=covariance_type
+        ))
+
+        priors.append(np.sum(wi))
+
+    priors = np.array(priors)
+    priors = (priors / priors.sum()).astype(np.float32)
+
+
+    gmm = GeneralMixtureModel(
+        dists,
+        tol=1e-3,
+        priors=priors,
+        verbose=0)
+    gmm.fit(
+        X=data.astype(np.float32),
+        sample_weight=weights.astype(np.float32),
+    )
+    return gmm
+
+def compute_bic_pomegranate(model, X):
+    """
+    Compute the Bayesian Information Criterion (BIC) for a fitted
+    pomegranate GeneralMixtureModel on dataset X.
+
+    Parameters
+    ----------
+    model : pomegranate.GeneralMixtureModel
+        A trained/fitted model with .distributions and .priors attributes.
+
+    X : np.ndarray of shape (n_samples, n_features)
+        Input dataset the model was fitted or evaluated on.
+
+    Returns
+    -------
+    bic : float
+        Bayesian Information Criterion. Lower is better.
+    """
+
+    # Get basic shape
+    n_samples, d = X.shape
+    k = len(model.distributions)  # Number of components
+
+    # Count number of parameters
+    num_params = 0
+    for dist in model.distributions:
+        if dist.name == "Normal":
+            cov_type = dist.covariance_type
+            if cov_type == 'full':
+                # d means + d*(d+1)/2 for symmetric covariance
+                num_params += d + (d * (d + 1)) // 2
+            elif cov_type == 'diag':
+                # d means + d variances
+                num_params += 2 * d
+            elif cov_type == 'sphere':
+                # d means + 1 shared variance
+                num_params += d + 1
+            else:
+                raise ValueError(f"Unknown covariance_type: {cov_type}")
+        else:
+            raise ValueError(f"Unsupported distribution type: {dist.name}")
+            # Fallback: count all scalar parameters
+            # num_params += sum(np.array(p).size for p in dist.parameters)
+
+    # Add k - 1 degrees of freedom for priors (they sum to 1)
+    num_params += k - 1
+
+    # Compute total log-likelihood under model
+    log_likelihood = np.sum(np.log(model.probability(X).detach().cpu().numpy()))
+
+    
+    # Compute BIC
+    bic = -2 * log_likelihood + num_params * np.log(n_samples)
+
+    return bic
 
 
 def evaluate_gmm(data, n_min=2, n_max=20):
@@ -577,7 +687,7 @@ def evaluate_catboost(metric, indices, plot=True):
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
-            model = CatBoostClassifier(**params, cat_features=cat_features, verbose=0)
+            model = CatBoostClassifier(**params, cat_features=cat_features, verbose=0, task_type="GPU")
             model.fit(X_train, y_train)
             y_pred = model.predict(X_test)
             y_pred_proba = model.predict_proba(X_test)
@@ -635,32 +745,34 @@ def tune_catboost(metric, indices):
         'FUELHEAT', 'EQUIPM', 'CELLAR', 'WALLTYPE', 'BASEFIN'
     ]]
 
-    model = CatBoostClassifier(cat_features=cat_features, verbose=0)
+    model = CatBoostClassifier(cat_features=cat_features, verbose=0, task_type="GPU",)
 
     param_grid = {
-        'iterations': [100, 300],
+        'iterations': [100, 200],
         'depth': [4, 6, 8],
         'learning_rate': [0.03, 0.1],
-        'l2_leaf_reg': [1, 3, 5]
+        'l2_leaf_reg': [1, 3, 5],
     }
 
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    result = model.grid_search(param_grid, X, y, plot=False)
 
-    clf = GridSearchCV(model, param_grid, cv=skf, scoring='accuracy', n_jobs=-1, verbose=1)
-    clf.fit(X, y)
+    # skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-    best_model = clf.best_estimator_
-    best_score = clf.best_score_
-    best_params = clf.best_params_
+    # clf = GridSearchCV(model, param_grid, cv=skf, scoring='accuracy', n_jobs=-1, verbose=1)
+    # clf.fit(X, y)
 
-    metric.pipelines = {'CatBoost': best_model}
-    metric.predictors_performance = pd.DataFrame([{
-        'Model': 'CatBoost (Tuned)',
-        'Accuracy': best_score,
-        'Params': best_params
-    }])
+    # best_model = clf.best_estimator_
+    # best_score = clf.best_score_
+    # best_params = clf.best_params_
 
-    return best_model, best_score, best_params
+    # metric.pipelines = {'CatBoost': best_model}
+    # metric.predictors_performance = pd.DataFrame([{
+    #     'Model': 'CatBoost (Tuned)',
+    #     'Accuracy': best_score,
+    #     'Params': best_params
+    # }])
+
+    return result #best_model, best_score, best_params
 
 
 def categorical_numeric_bar(df_plot, categorical, numeric):
