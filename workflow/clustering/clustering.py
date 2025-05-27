@@ -177,6 +177,7 @@ def preprocess_columns(
             - preprocessed_data (pd.DataFrame): The transformed DataFrame after preprocessing.
             - categorical_indices (list): List of indices corresponding to the categorical columns.
             - preprocessor (ColumnTransformer): The fitted ColumnTransformer object used for preprocessing.
+            - weights (np.array): An array of weights for each row in the DataFrame.
     """
 
     data=df.copy()
@@ -206,8 +207,13 @@ def preprocess_columns(
         ], verbose_feature_names_out=False
     ).set_output(transform='pandas')
     preprocessed_data = preprocessor.fit_transform(data)
+    
+    if 'NWEIGHT' in data.columns:
+        weights = data['NWEIGHT'].values
+    else:
+        weights = np.ones(data.shape[0])
 
-    return preprocessed_data, categorical_indices, preprocessor
+    return preprocessed_data, categorical_indices, preprocessor, weights
 
 
 
@@ -283,6 +289,9 @@ def perform_gmm_weighted(data, n=2, seed=0, covariance_type='full', weights=None
         Xi = data[mask]
         wi = weights[mask]
 
+        if len(Xi) < 2:  # Guard against tiny clusters
+            continue
+        
         # Weighted mean
         mean = np.average(Xi, axis=0, weights=wi)
 
@@ -290,11 +299,26 @@ def perform_gmm_weighted(data, n=2, seed=0, covariance_type='full', weights=None
         Xi_centered = Xi - mean
         cov = np.cov(Xi_centered.T, aweights=wi, ddof=0)
 
-        dists.append(Normal(
-            means=torch.tensor(mean, dtype=torch.float32),
-            covs=torch.tensor(cov, dtype=torch.float32),
-            covariance_type=covariance_type
-        ))
+        # Regularization: ensure positive-definiteness
+        eps = 1e-6
+        cov += np.eye(cov.shape[0]) * eps
+
+        try:
+            dist = Normal(
+                means=torch.tensor(mean, dtype=torch.float32),
+                covs=torch.tensor(cov, dtype=torch.float32),
+                covariance_type=covariance_type
+            )
+        except RuntimeError as e:
+            # If Cholesky still fails, increase regularization and retry
+            cov += np.eye(cov.shape[0]) * (10 * eps)
+            dist = Normal(
+                means=torch.tensor(mean, dtype=torch.float32),
+                covs=torch.tensor(cov, dtype=torch.float32),
+                covariance_type=covariance_type
+            )
+
+        dists.append(dist)
 
         priors.append(np.sum(wi))
 
@@ -307,13 +331,14 @@ def perform_gmm_weighted(data, n=2, seed=0, covariance_type='full', weights=None
         tol=1e-3,
         priors=priors,
         verbose=0)
-    gmm.fit(
-        X=data.astype(np.float32),
-        sample_weight=weights.astype(np.float32),
-    )
+    
+    X_np = np.asarray(data, dtype=np.float32)
+    w_np = np.asarray(weights, dtype=np.float32)
+    gmm.fit(X=X_np, sample_weight=w_np)
+
     return gmm
 
-def compute_bic_pomegranate(model, X):
+def compute_aic_bic_pomegranate(model: GeneralMixtureModel, X):
     """
     Compute the Bayesian Information Criterion (BIC) for a fitted
     pomegranate GeneralMixtureModel on dataset X.
@@ -361,16 +386,16 @@ def compute_bic_pomegranate(model, X):
     num_params += k - 1
 
     # Compute total log-likelihood under model
-    log_likelihood = np.sum(np.log(model.probability(X).detach().cpu().numpy()))
+    log_likelihood = np.sum(np.log(model.probability(np.asarray(X, dtype=np.float32)).detach().cpu().numpy()))
 
     
     # Compute BIC
     bic = -2 * log_likelihood + num_params * np.log(n_samples)
+    aic = -2 * log_likelihood + 2 * num_params
+    return  (aic, bic)
 
-    return bic
 
-
-def evaluate_gmm(data, n_min=2, n_max=20):
+def evaluate_gmm(data, n_min=2, n_max=20, weights=None):
     n_max = min(n_max, data.shape[0] - 1)
     n_min = max(2, n_min)
     metrics = []
@@ -385,7 +410,20 @@ def evaluate_gmm(data, n_min=2, n_max=20):
     return range_n, metrics
 
 
-
+def evaluate_gmm_weighted(data, n_min=2, n_max=20, weights=None):
+    n_max = min(n_max, data.shape[0] - 1)
+    n_min = max(2, n_min)
+    metrics = []
+    range_n = range(n_min, n_max + 1)
+    if weights is None:
+        weights = np.ones(data.shape[0])
+    for n in range_n:
+        gmm = perform_gmm_weighted(data, n=n, weights=weights)
+        metric = Metrics(model=gmm, data=data, labels=gmm.predict(np.asarray(data, dtype=np.float32)).detach().cpu().numpy(), update=True)
+        metric.update_metrics()
+        metric.AIC, metric.BIC = compute_aic_bic_pomegranate(gmm, data)
+        metrics.append(metric)
+    return range_n, metrics
 
 
 
@@ -412,16 +450,18 @@ def plot_evaluation(range_n, metrics_dict):
 
 
 def cluster_subset(ccat, ccon, subset, cluster_method, fig, axes, axpos=0):
-    attributes = ccat + ccon
+    attributes = ccat + ccon + ['NWEIGHT']
     subset = select_subset(df_computed, by=subset)
     indices = subset.index
     da = df_computed.loc[indices][attributes]
+    
+    processed_data, _categorical_indices, _preprocessor, weights = automatic_preprocess_columns(da, cols_cat=ccat, cols_con=ccon, cols_scl=[])
 
-    interval, metrics = cluster_method(automatic_preprocess_columns(da, cols_cat=ccat, cols_con=ccon, cols_scl=[])[0])
+    interval, metrics = cluster_method(
+        processed_data, n_min=2, n_max=20, weights=weights
+        )
     #fig, axes = plt.subplots(1, 2, figsize=(10, 5), layout='constrained')
     bics = [m.BIC for m in metrics]
-    bmax = np.max(bics)
-    bmin = np.min(bics)
 
     axes[axpos].plot(interval, bics, marker='o', markersize=5, label='BIC')
     axes[axpos].set_xticks(interval, interval)
