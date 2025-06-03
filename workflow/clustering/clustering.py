@@ -469,14 +469,17 @@ def cluster_subset(ccat, ccon, subset, cluster_method, ax,
     subset = select_subset(df_computed, by=subset)
     indices = subset.index
     da = df_computed.loc[indices][attributes]
-    
-    processed_data, _categorical_indices, _preprocessor, weights = automatic_preprocess_columns(da, cols_cat=ccat, cols_con=ccon, cols_scl=[])
+    if subset.shape[0] == 0:
+        bics = []
+        metrics = []
+    else:
+        processed_data, _categorical_indices, _preprocessor, weights = automatic_preprocess_columns(da, cols_cat=ccat, cols_con=ccon, cols_scl=[])
 
-    interval, metrics = cluster_method(
-        processed_data, n_min=n_min, n_max=n_max, weights=weights
-        )
-    #fig, axes = plt.subplots(1, 2, figsize=(10, 5), layout='constrained')
-    bics = [m.BIC for m in metrics]
+        interval, metrics = cluster_method(
+            processed_data, n_min=n_min, n_max=n_max, weights=weights
+            )
+        #fig, axes = plt.subplots(1, 2, figsize=(10, 5), layout='constrained')
+        bics = [m.BIC for m in metrics]
 
     if len(bics) < 2:
         ax.set_xlim(0, 1)
