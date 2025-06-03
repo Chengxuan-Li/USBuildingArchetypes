@@ -1,0 +1,7 @@
+,archetype_category,IECC_climate_code,TYPEHUQ,cluster_count,best_prediction_accuracy,bic
+0,construction,7B,6.0,2.0,0.9,117.38232615989307
+1,construction,7B,6.0,3.0,0.8,339.6086696561641
+0,systems,7B,6.0,2.0,0.0,85.24957627309311
+1,systems,7B,6.0,3.0,0.0,468.81915175955805
+0,energy_loads,7B,6.0,2.0,0.9,99.18015470379714
+1,energy_loads,7B,6.0,3.0,0.8,52.000845134984104
