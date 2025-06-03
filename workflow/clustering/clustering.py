@@ -236,16 +236,17 @@ class Metrics:
         self.predictors_performance = None
         self.pipelines = None
         self.model = None
+        self.cluster_count = None
         self.labels = None
         self.data = None
         self.AIC = None #lower
         self.BIC = None #lower
-        self.silhouette = None #higher
-        self.davies_bouldin = None #lower
+        #self.silhouette = None #higher
+        #self.davies_bouldin = None #lower
         #self.homogeneity = None #higher
         #self.completeness = None #higher
         #self.v_measure = None #higher
-        self.calinski_harabasz = None #higher
+        #self.calinski_harabasz = None #higher
         self.RoNoE = None # Ratio of the number of elements (Tardioli et al 2018) #lower
         # self.explained_variance = None
         # self.total_energy_represented = 0
@@ -253,13 +254,16 @@ class Metrics:
         # self.energy_validator_column = []
         self.update = False
         self.__dict__.update(kwargs)
+        self.best_prediction_accuracy = 0.0
         if self.update:
             self.update_metrics()
     def update_metrics(self):
-        self.silhouette =  silhouette_score(self.data, self.labels)
-        self.davies_bouldin = davies_bouldin_score(self.data, self.labels)
-        self.calinski_harabasz = calinski_harabasz_score(self.data, self.labels)
+        
+        #self.silhouette =  silhouette_score(self.data, self.labels)
+        #self.davies_bouldin = davies_bouldin_score(self.data, self.labels)
+        #self.calinski_harabasz = calinski_harabasz_score(self.data, self.labels
         counts = [np.sum(self.labels == label) for label in np.unique(self.labels)]
+    
         self.RoNoE = np.min(counts) / np.max(counts)
         # self.explained_variance = calculate_explained_variance(self.data, self.labels)
 
@@ -289,8 +293,8 @@ def perform_gmm_weighted(data, n=2, seed=0, covariance_type='full', weights=None
         Xi = data[mask]
         wi = weights[mask]
 
-        if len(Xi) < 2:  # Guard against tiny clusters
-            continue
+        # if len(Xi) < 2:  # Guard against tiny clusters
+        #     continue
         
         # Weighted mean
         mean = np.average(Xi, axis=0, weights=wi)
@@ -386,23 +390,27 @@ def compute_aic_bic_pomegranate(model: GeneralMixtureModel, X):
     num_params += k - 1
 
     # Compute total log-likelihood under model
-    log_likelihood = np.sum(np.log(model.probability(np.asarray(X, dtype=np.float32)).detach().cpu().numpy()))
-
+    # log_likelihood = np.sum(np.log(model.probability(np.asarray(X, dtype=np.float32)).detach().cpu().numpy()))
+    log_likelihood = np.sum(model.log_probability(np.asarray(X, dtype=np.float32)).detach().cpu().numpy())
     
     # Compute BIC
     bic = -2 * log_likelihood + num_params * np.log(n_samples)
     aic = -2 * log_likelihood + 2 * num_params
     return  (aic, bic)
 
-
 def evaluate_gmm(data, n_min=2, n_max=20, weights=None):
-    n_max = min(n_max, data.shape[0] - 1)
+    n_max = min(n_max, int(np.round(data.shape[0] / 2) - 1))
     n_min = max(2, n_min)
     metrics = []
     range_n = range(n_min, n_max + 1)
     for n in range_n:
         gmm = perform_gmm(data, n=n)
-        metric = Metrics(model=gmm, data=data, labels=gmm.predict(data), update=True)
+        metric = Metrics(
+            model=gmm,
+            data=data,
+            labels=gmm.predict(data),
+            cluster_count=gmm.n_components,
+            update=True)
         metric.update_metrics()
         metric.AIC = gmm.aic(data)
         metric.BIC = gmm.bic(data)
@@ -411,7 +419,7 @@ def evaluate_gmm(data, n_min=2, n_max=20, weights=None):
 
 
 def evaluate_gmm_weighted(data, n_min=2, n_max=20, weights=None):
-    n_max = min(n_max, data.shape[0] - 1)
+    n_max = min(n_max, int(np.round(data.shape[0] / 2) - 1))
     n_min = max(2, n_min)
     metrics = []
     range_n = range(n_min, n_max + 1)
@@ -419,7 +427,12 @@ def evaluate_gmm_weighted(data, n_min=2, n_max=20, weights=None):
         weights = np.ones(data.shape[0])
     for n in range_n:
         gmm = perform_gmm_weighted(data, n=n, weights=weights)
-        metric = Metrics(model=gmm, data=data, labels=gmm.predict(np.asarray(data, dtype=np.float32)).detach().cpu().numpy(), update=True)
+        metric = Metrics(
+            model=gmm,
+            data=data,
+            labels=gmm.predict_gmm(np.asarray(data, dtype=np.float32)).detach().cpu().numpy(),
+            cluster_count=gmm.priors.shape[0],
+            update=True)
         metric.update_metrics()
         metric.AIC, metric.BIC = compute_aic_bic_pomegranate(gmm, data)
         metrics.append(metric)
@@ -448,8 +461,10 @@ def plot_evaluation(range_n, metrics_dict):
     return fig, axes
 
 
-
-def cluster_subset(ccat, ccon, subset, cluster_method, fig, axes, axpos=0):
+import tqdm
+def cluster_subset(ccat, ccon, subset, cluster_method, ax,
+                   n_min=2, n_max=20,
+                   ):
     attributes = ccat + ccon + ['NWEIGHT']
     subset = select_subset(df_computed, by=subset)
     indices = subset.index
@@ -458,24 +473,46 @@ def cluster_subset(ccat, ccon, subset, cluster_method, fig, axes, axpos=0):
     processed_data, _categorical_indices, _preprocessor, weights = automatic_preprocess_columns(da, cols_cat=ccat, cols_con=ccon, cols_scl=[])
 
     interval, metrics = cluster_method(
-        processed_data, n_min=2, n_max=20, weights=weights
+        processed_data, n_min=n_min, n_max=n_max, weights=weights
         )
     #fig, axes = plt.subplots(1, 2, figsize=(10, 5), layout='constrained')
     bics = [m.BIC for m in metrics]
 
-    axes[axpos].plot(interval, bics, marker='o', markersize=5, label='BIC')
-    axes[axpos].set_xticks(interval, interval)
-    axes[axpos].set_xticklabels(interval, rotation=90, fontsize=8)
-    axes[axpos].set_ylabel('BIC')
-    axes[axpos].set_xlabel('Number of Clusters')
-    axes[axpos].grid(True)
+    if len(bics) < 2:
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.text(
+            0.5, 0.5,
+            f'Number of samples\nis few ({da.shape[0]}).\nConsider manual\narchetype identification.',
+            horizontalalignment='center',
+            verticalalignment='center',
+            )
+        ax.set_xticks([])
+        ax.set_yticks([])
+    else:
 
-    axtwin = axes[axpos].twinx()
-    axtwin.bar(interval, [evaluate_mls(m, da.index, plot=False)[0]['Accuracy'].max() for m in metrics], .4, alpha=0.5, label='Assignment Accuracy')
-    axtwin.set_ylim(0, 1)
-    handles, labels = axes[axpos].get_legend_handles_labels()
-    handles2, labels2 = axtwin.get_legend_handles_labels()
-    axes[axpos].legend(handles + handles2, labels + labels2, loc='upper right', prop={'size': 8})
+
+        ax.plot(interval, bics, marker='o', markersize=5, label='BIC')
+        ax.set_xticks(interval, interval)
+        ax.set_xticklabels(interval, rotation=90, fontsize=8)
+        ax.set_ylabel('BIC')
+        ax.set_xlabel(f'Number of Clusters (N={da.shape[0]})')
+        ax.grid(True)
+
+        axtwin = ax.twinx()
+        for m_id in tqdm.trange(len(metrics)):
+            m = metrics[m_id]
+            try:
+                m.best_prediction_accuracy = evaluate_mls_kfold(m, da.index, plot=False)[0]['Accuracy'].max()
+            except Exception as e:
+                print(f"Error evaluating model for metrics[{m_id}]")
+                m.best_prediction_accuracy = 0.0
+
+        axtwin.bar(interval, [m.best_prediction_accuracy for m in metrics], .4, alpha=0.5, label='Assignment Accuracy')
+        axtwin.set_ylim(0, 1)
+        handles, labels = ax.get_legend_handles_labels()
+        handles2, labels2 = axtwin.get_legend_handles_labels()
+        ax.legend(handles + handles2, labels + labels2, loc='upper right', prop={'size': 8})
     return da, metrics
 
 
@@ -644,7 +681,6 @@ def evaluate_mls_kfold(metric, indices, plot=True, n_splits=5):  # use k-fold in
             ('preprocessor', preprocessor),
             ('classifier', model)
         ])
-        
         scores = cross_validate(pipeline, X, y, cv=skf, scoring=scoring, return_train_score=False)
         
         results.append({
@@ -718,6 +754,7 @@ def evaluate_catboost(metric, indices, plot=True):
     ]
 
     results = []
+    models = []
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
     for params in param_variants:
@@ -727,8 +764,9 @@ def evaluate_catboost(metric, indices, plot=True):
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
-            model = CatBoostClassifier(**params, cat_features=cat_features, verbose=0, task_type="GPU")
+            model = CatBoostClassifier(**params, cat_features=cat_features, verbose=0, task_type="CPU")
             model.fit(X_train, y_train)
+            models.append(model)
             y_pred = model.predict(X_test)
             y_pred_proba = model.predict_proba(X_test)
 
@@ -771,7 +809,7 @@ def evaluate_catboost(metric, indices, plot=True):
         plt.show()
 
     metric.predictors_performance = results_df
-    return results_df
+    return results_df, models
 
 
 from sklearn.model_selection import GridSearchCV
