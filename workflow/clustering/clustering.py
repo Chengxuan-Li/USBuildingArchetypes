@@ -462,7 +462,7 @@ def plot_evaluation(range_n, metrics_dict):
 
 
 import tqdm
-def cluster_subset(ccat, ccon, subset, cluster_method, ax,
+def cluster_evaluation_subset(ccat, ccon, subset, cluster_method, ax,
                    n_min=2, n_max=20,
                    ):
     attributes = ccat + ccon + ['NWEIGHT']
@@ -518,7 +518,29 @@ def cluster_subset(ccat, ccon, subset, cluster_method, ax,
         ax.legend(handles + handles2, labels + labels2, loc='upper right', prop={'size': 8})
     return da, metrics
 
+def cluster_subset(ccat, ccon, subset, n, use_weighted_gmm=True):
+    attributes = ccat + ccon + ['NWEIGHT']
+    subset = select_subset(df_computed, by=subset)
+    indices = subset.index
+    da = df_computed.loc[indices][attributes]
+    if subset.shape[0] == 0:
+        model = None
+        labels = np.array([])
+        weights = np.array([])
+    else:
+        processed_data, _categorical_indices, _preprocessor, weights = automatic_preprocess_columns(da, cols_cat=ccat, cols_con=ccon, cols_scl=[])
+        if use_weighted_gmm:
+            model = perform_gmm_weighted(
+                processed_data, n=n, weights=weights
+            )
+            labels = model.predict_gmm(np.asarray(processed_data, dtype=np.float32)).detach().cpu().numpy()
+        else:
+            model = perform_gmm(
+                processed_data, n=n
+            )
+            labels = model.predict(processed_data)
 
+    return model, labels, weights
 
 excol = ['TOTSQFT_EN', 'TYPEHUQ', 'urban_grouped', 'acequipm_pub_grouped', 'FUELHEAT', 'EQUIPM', 'YEARMADERANGE', 'CELLAR', 'WALLTYPE', 'BASEFIN', 'num_u65', 'NUMADULT2',]
 def evaluate_mls(metric, indices, plot=True): # determine optimal cluster count to perform evaluation
@@ -855,6 +877,93 @@ def tune_catboost(metric, indices):
 
     return result #best_model, best_score, best_params
 
+from lightgbm import LGBMClassifier
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score, log_loss
+
+def evaluate_lightgbm(metric, indices, plot=True):
+    y = metric.labels
+    X = df_computed[excol].loc[indices]
+
+    cat_features = [
+        'TYPEHUQ', 'urban_grouped', 'acequipm_pub_grouped',
+        'FUELHEAT', 'EQUIPM', 'CELLAR', 'WALLTYPE', 'BASEFIN'
+    ]
+
+    param_variants = [
+        {'n_estimators': 50, 'learning_rate': 0.02, 'max_depth': 4},
+        {'n_estimators': 100, 'learning_rate': 0.05, 'max_depth': 6},
+        {'n_estimators': 200, 'learning_rate': 0.1, 'max_depth': 8}
+    ]
+
+    for cf in cat_features:
+        X[cf] = X[cf].astype('category')
+
+    results = []
+    models = []
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    for params in param_variants:
+        accs, losses = [], []
+        for train_idx, test_idx in skf.split(X, y):
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+
+            # use missing=None to force negative categorical values as valid values
+            # alternatively, convert the type of each categorical col to pd category
+            # which is the implemented approach currently
+            model = LGBMClassifier(**params)
+            
+            model.fit(
+                X_train, y_train,
+                categorical_feature=cat_features
+            )
+
+            models.append(model)
+            y_pred = model.predict(X_test)
+            y_proba = model.predict_proba(X_test)
+
+            accs.append(accuracy_score(y_test, y_pred))
+            losses.append(log_loss(y_test, y_proba, labels=np.unique(y)))
+
+        results.append({
+            'Params': params,
+            'Accuracy': np.mean(accs),
+            'Log Loss': np.mean(losses)
+        })
+
+    results_df = pd.DataFrame(results).sort_values(by='Accuracy', ascending=False)
+
+    if plot:
+        fig, ax1 = plt.subplots(figsize=(6, 6))
+        x = np.arange(len(results_df))
+        accs = results_df['Accuracy']
+        losses = results_df['Log Loss']
+        labels = [str(p) for p in results_df['Params']]
+
+        bars = ax1.bar(x, accs, width=0.5, label='Accuracy')
+        ax1.set_ylabel('Accuracy')
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(labels, rotation=45, ha='right')
+        ax1.set_ylim(0, 1)
+
+        for bar in bars:
+            ax1.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f'{bar.get_height():.2f}',
+                     ha='center', va='bottom', fontsize=8)
+
+        ax2 = ax1.twinx()
+        ax2.plot(x, losses, color=cmap(5/9), marker='o', label='Log Loss')
+        ax2.set_ylabel('Log Loss')
+        for i, loss in enumerate(losses):
+            ax2.text(x[i], loss, f'{loss:.2f}', ha='center', va='bottom', fontsize=8)
+
+        fig.suptitle('LightGBM Performance Across Param Variants')
+        fig.tight_layout()
+        plt.show()
+
+    metric.predictors_performance = results_df
+    return results_df, models
+
 
 def categorical_numeric_bar(df_plot, categorical, numeric):
     # Filter numeric data to remove outliers (values > 97th quantile)
@@ -925,7 +1034,7 @@ def auto_detect_cat(df):
     return ccat, ccon
 
 
-def plot_cluster_result_bars(da, metric, ccon=None, ccat=None):
+def plot_cluster_result_bars(da, labels, ccon=None, ccat=None):
     cccat, cccon = auto_detect_cat(da)
     if ccon is None:
         ccon = cccon
@@ -933,7 +1042,7 @@ def plot_cluster_result_bars(da, metric, ccon=None, ccat=None):
         ccat = cccat
         
     da_clustered = df_computed.loc[da.index]
-    da_clustered['label'] = metric.labels
+    da_clustered['label'] = labels
     for c in ccon:
         categorical_numeric_bar(da_clustered, 'label', c)
     for c in ccat:
@@ -942,7 +1051,7 @@ def plot_cluster_result_bars(da, metric, ccon=None, ccat=None):
 
 
 
-def continuous_feature_kde(df_plot, feature: str, cluster_metric, Q: float = 0.99):
+def continuous_feature_kde(df_plot, feature: str, labels, Q: float = 0.99):
     """
     Plots KDEs for a continuous feature, segmented by clusters, with mean and variance displayed.
     
@@ -953,7 +1062,7 @@ def continuous_feature_kde(df_plot, feature: str, cluster_metric, Q: float = 0.9
         Q (float): The quantile to cap the data (default is 0.99).
     """
     df_plot = df_plot.copy()
-    df_plot['label'] = cluster_metric.labels
+    df_plot['label'] = labels
     # Filter the data to cap at the specified quantile
     cap_value = df_plot[feature].quantile(Q)
     df_plot = df_plot[df_plot[feature] <= cap_value]
