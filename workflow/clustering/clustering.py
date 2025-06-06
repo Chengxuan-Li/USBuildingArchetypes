@@ -438,6 +438,39 @@ def evaluate_gmm_weighted(data, n_min=2, n_max=20, weights=None):
         metrics.append(metric)
     return range_n, metrics
 
+	# def predict_gmm(self, X, priors=None):
+	# 	"""Calculate the label assignment for each example.
+
+	# 	This method calculates the label for each example as the most likely
+	# 	component after factoring in the prior probability.
+
+
+	# 	Parameters
+	# 	----------
+	# 	X: list, tuple, numpy.ndarray, torch.Tensor, shape=(-1, self.d)
+	# 		A set of examples to summarize.
+
+	# 	priors: list, numpy.ndarray, torch.Tensor, shape=(-1, self.k)
+	# 		Prior probabilities of assigning each symbol to each node. If not
+	# 		provided, do not include in the calculations (conceptually
+	# 		equivalent to a uniform probability, but without scaling the
+	# 		probabilities). This can be used to assign labels to observatons
+	# 		by setting one of the probabilities for an observation to 1.0.
+	# 		Note that this can be used to assign hard labels, but does not
+	# 		have the same semantics for soft labels, in that it only
+	# 		influences the initial estimate of an observation being generated
+	# 		by a component, not gives a target. Default is None.
+
+
+	# 	Returns
+	# 	-------
+	# 	y: torch.Tensor, shape=(-1,)
+	# 		The predicted label for each example.
+	# 	"""
+
+	# 	e = self._emission_matrix(X, priors=self.distributions)
+	# 	return torch.argmax(e, dim=1)
+
 
 
 def plot_evaluation(range_n, metrics_dict):
