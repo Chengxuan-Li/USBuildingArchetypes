@@ -37,6 +37,7 @@ from sklearn.metrics import accuracy_score, log_loss
 import torch
 from pomegranate.gmm import GeneralMixtureModel
 from pomegranate.distributions import Normal
+from pomegranate._utils import _update_parameter as update_parameter
 
 
 # Get the Set1 colormap
@@ -274,6 +275,83 @@ def perform_gmm(data, n=2, seed=0, covariance_type='full'):
     gmm.fit(data)
     return gmm
 
+
+class GeneralMixtureModelWrapper(GeneralMixtureModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def predict_gmm(self, X, priors=None):
+        """Calculate the label assignment for each example.
+
+        This method calculates the label for each example as the most likely
+        component after factoring in the prior probability.
+
+
+        Parameters
+        ----------
+        X: list, tuple, numpy.ndarray, torch.Tensor, shape=(-1, self.d)
+            A set of examples to summarize.
+
+        priors: list, numpy.ndarray, torch.Tensor, shape=(-1, self.k)
+            Prior probabilities of assigning each symbol to each node. If not
+            provided, do not include in the calculations (conceptually
+            equivalent to a uniform probability, but without scaling the
+            probabilities). This can be used to assign labels to observatons
+            by setting one of the probabilities for an observation to 1.0.
+            Note that this can be used to assign hard labels, but does not
+            have the same semantics for soft labels, in that it only
+            influences the initial estimate of an observation being generated
+            by a component, not gives a target. Default is None.
+
+
+        Returns
+        -------
+        y: torch.Tensor, shape=(-1,)
+            The predicted label for each example.
+        """
+
+        e = self._emission_matrix(X, priors=self.distributions)
+        return torch.argmax(e, dim=1)
+
+class NormalWrapper(Normal):
+    """
+    A wrapper around the Normal class with modified from_summaries behavior.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def from_summaries(self):
+        """Update the model parameters given the extracted statistics.
+
+        This method uses calculated statistics from calls to the `summarize`
+        method to update the distribution parameters. Hyperparameters for the
+        update are passed in at initialization time.
+        """
+
+        if self.frozen:
+            return
+
+        means = self._xw_sum / self._w_sum
+
+        if self.covariance_type == 'full':
+            v = self._xw_sum.unsqueeze(0) * self._xw_sum.unsqueeze(1)
+            covs = self._xxw_sum / self._w_sum - v / self._w_sum ** 2.0
+
+            # Regularization
+            epsilon = 1e-4 if self.min_cov is None else self.min_cov
+            covs += torch.eye(self.d, dtype=self.dtype, device=self.device) * epsilon
+
+        elif self.covariance_type == 'diag':
+            covs = self._xxw_sum / self._w_sum - self._xw_sum ** 2.0 / self._w_sum ** 2.0
+
+            # Regularization
+            epsilon = 1e-4 if self.min_cov is None else self.min_cov
+            covs = torch.maximum(covs, torch.tensor(epsilon, dtype=self.dtype, device=self.device))
+
+        update_parameter(self.means, means, self.inertia)
+        update_parameter(self.covs, covs, self.inertia)
+        self._reset_cache()
+
 def perform_gmm_weighted(data, n=2, seed=0, covariance_type='full', weights=None):
 
     np.random.seed(seed)
@@ -308,7 +386,7 @@ def perform_gmm_weighted(data, n=2, seed=0, covariance_type='full', weights=None
         cov += np.eye(cov.shape[0]) * eps
 
         try:
-            dist = Normal(
+            dist = NormalWrapper(
                 means=torch.tensor(mean, dtype=torch.float32),
                 covs=torch.tensor(cov, dtype=torch.float32),
                 covariance_type=covariance_type
@@ -316,7 +394,7 @@ def perform_gmm_weighted(data, n=2, seed=0, covariance_type='full', weights=None
         except RuntimeError as e:
             # If Cholesky still fails, increase regularization and retry
             cov += np.eye(cov.shape[0]) * (10 * eps)
-            dist = Normal(
+            dist = NormalWrapper(
                 means=torch.tensor(mean, dtype=torch.float32),
                 covs=torch.tensor(cov, dtype=torch.float32),
                 covariance_type=covariance_type
@@ -330,7 +408,7 @@ def perform_gmm_weighted(data, n=2, seed=0, covariance_type='full', weights=None
     priors = (priors / priors.sum()).astype(np.float32)
 
 
-    gmm = GeneralMixtureModel(
+    gmm = GeneralMixtureModelWrapper(
         dists,
         tol=1e-3,
         priors=priors,
@@ -342,14 +420,14 @@ def perform_gmm_weighted(data, n=2, seed=0, covariance_type='full', weights=None
 
     return gmm
 
-def compute_aic_bic_pomegranate(model: GeneralMixtureModel, X):
+def compute_aic_bic_pomegranate(model: GeneralMixtureModelWrapper, X):
     """
     Compute the Bayesian Information Criterion (BIC) for a fitted
-    pomegranate GeneralMixtureModel on dataset X.
+    GeneralMixtureModelWrapper on dataset X.
 
     Parameters
     ----------
-    model : pomegranate.GeneralMixtureModel
+    model : GeneralMixtureModelWrapper of pomegranate GeneralMixtureModel
         A trained/fitted model with .distributions and .priors attributes.
 
     X : np.ndarray of shape (n_samples, n_features)
@@ -822,7 +900,7 @@ def evaluate_catboost(metric, indices, plot=True):
             X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
-            model = CatBoostClassifier(**params, cat_features=cat_features, verbose=0, task_type="CPU")
+            model = CatBoostClassifier(**params, cat_features=cat_features, verbose=0, task_type="GPU")
             model.fit(X_train, y_train)
             models.append(model)
             y_pred = model.predict(X_test)
