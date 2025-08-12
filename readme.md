@@ -1,6 +1,5 @@
 # USBuildingArchetypes
 
-
 ## Planned for feature releases
 
 - [ ] Bayesian networks?
@@ -38,3 +37,11 @@ When searching for the best fit, there are cases where a perfect match simply do
 In this case we should search for the closest match or the closest matches where only a subset of all important features are matched. The selection for the "important features" could be the result of a feature importance ranking produced from the cluster exercise, (or not).
 
 How is this connected to the "Bayesian Network" approach?
+
+
+
+## Publications
+
+|Publication|Title|Paper|Code|Summary/presentation|
+|:-|:-|:-:|:-:|:-:|
+|Proceedings of the 19th IBPSA Conference (Brisbane, Australia, Aug 24-27, 2025)|["Deriving high-fidelity residential building archetypes and typical usage patterns from national energy use surveys to enhance “initial guesses” for Urban Building Energy Model (UBEM) inputs"](https://doi.org/10.26868/25222708.2025.11336)|[Full paper PDF](papers/ibpsa2025/paper/11336_Li_BS2025.pdf)|[Notebooks](papers/ibpsa2025/workflow/)|[Conference presentation slides]()|
